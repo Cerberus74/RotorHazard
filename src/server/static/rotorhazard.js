@@ -2,6 +2,22 @@ var sound_buzzer = $('#sound_buzzer')[0];
 var sound_beep = $('#sound_beep')[0];
 var sound_stage = $('#sound_stage')[0];
 
+// bitmask values for 'phonetic_split_call' function
+const SPLMSK_PILOT_NAME = 0x01
+const SPLMSK_SPLIT_ID = 0x02
+const SPLMSK_SPLIT_TIME = 0x04
+
+// minimum value in logarithmic volume range and limit value for "zero" volume
+const MIN_LOG_VOLUME = 0.01;
+const MIN_LOG_VOL_LIM = MIN_LOG_VOLUME + MIN_LOG_VOLUME/1000.0;
+const MAX_LOG_VOLUME = 1.0;
+
+const LEADER_FLAG_CHAR = 'L';
+const WINNER_FLAG_CHAR = 'W';
+
+var speakObjsQueue = [];
+var checkSpeakQueueFlag = true;
+
 /* global functions */
 function supportsLocalStorage() {
 	try {
@@ -22,20 +38,30 @@ function median(arr){
 	return (values[half - 1] + values[half]) / 2.0;
 }
 
-function formatTimeMillis(s) {
-	// Pad to 2 or 3 digits, default is 2
-	function pad(n, z) {
-	z = z || 2;
-		return ('00' + n).slice(-z);
-	}
+// Pad to 2 or 3 digits, default is 2
+function pad(n, z=2) {
+	return ('000000' + n).slice(-z);
+}
 
+function formatTimeMillis(s, timeformat='{m}:{s}.{d}') {
 	s = Math.round(s);
 	var ms = s % 1000;
 	s = (s - ms) / 1000;
 	var secs = s % 60;
 	var mins = (s - secs) / 60;
 
-	return mins + ':' + pad(secs) + '.' + pad(ms, 3);
+	if (!formatted_time) {
+		timeformat = '{m}:{s}.{d}';
+	}
+	var formatted_time = timeformat.replace('{d}', pad(ms, 3));
+	formatted_time = formatted_time.replace('{s}', pad(secs));
+	formatted_time = formatted_time.replace('{m}', mins)
+
+	return formatted_time;
+}
+
+function colorvalToHex(color) {
+	return '#' + pad(color.toString(16), 6);
 }
 
 function convertColor(color) {
@@ -67,6 +93,14 @@ function contrastColor(hexcolor) {
 	}
 }
 
+function rgbtoHex(rgb) {
+    rgb = rgb.match(/^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/);
+    function hex(x) {
+        return ("0" + parseInt(x).toString(16)).slice(-2);
+    }
+    return "#" + hex(rgb[1]) + hex(rgb[2]) + hex(rgb[3]);
+}
+
 function hslToHex(h, s, l) {
 	h = parseInt(h.replace(/[^0-9\.]/gi, '')) / 360;
 	s = parseInt(s.replace(/[^0-9\.]/gi, '')) / 100;
@@ -95,6 +129,33 @@ function hslToHex(h, s, l) {
 		return hex.length === 1 ? '0' + hex : hex;
 	};
 	return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function hexToHsl(hex) {
+	var result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+		r = parseInt(result[1], 16);
+		g = parseInt(result[2], 16);
+		b = parseInt(result[3], 16);
+		r /= 255, g /= 255, b /= 255;
+		var max = Math.max(r, g, b), min = Math.min(r, g, b);
+		var h, s, l = (max + min) / 2;
+		if(max == min){
+			h = s = 0; // achromatic
+		}else{
+			var d = max - min;
+			s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+			switch(max){
+				case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+				case g: h = (b - r) / d + 2; break;
+				case b: h = (r - g) / d + 4; break;
+			}
+			h /= 6;
+		}
+	var HSL = new Object();
+	HSL['h']=h * 360;
+	HSL['s']=s * 100;
+	HSL['l']=l * 100;
+	return HSL;
 }
 
 function LogSlider(options) {
@@ -385,41 +446,115 @@ var isFirefox = navigator.userAgent.toLowerCase().indexOf('firefox') > -1;
 //callback to use on end of tone
 /* https://stackoverflow.com/questions/879152/how-do-i-make-javascript-beep/29641185#29641185 */
 function play_beep(duration, frequency, volume, type, fadetime, callback) {
-	var oscillator = globalAudioCtx.createOscillator();
-	var gainNode = globalAudioCtx.createGain();
-
-	oscillator.connect(gainNode);
-	gainNode.connect(globalAudioCtx.destination);
-
-	if (!duration)
-		duration = 500;
-
-	if (volume) {
+	if (volume && volume > MIN_LOG_VOL_LIM) {
+		var oscillator = globalAudioCtx.createOscillator();
+		var gainNode = globalAudioCtx.createGain();
+	
+		oscillator.connect(gainNode);
+		gainNode.connect(globalAudioCtx.destination);
+	
+		if (!duration)
+			duration = 500;
+	
 		gainNode.gain.value = volume;
-	} else {
-		gainNode.gain.value = 1;
+	
+		if (frequency)
+			oscillator.frequency.value = frequency;
+		if (type)
+			oscillator.type = type;
+		if (!fadetime)
+			fadetime = 1;
+		if (callback)
+			oscillator.onended = callback;
+	
+		if(isFirefox)
+			fadetime = 0;
+	
+		oscillator.start();
+		setTimeout(function(fade){
+			gainNode.gain.exponentialRampToValueAtTime(0.00001, globalAudioCtx.currentTime + fade);
+		}, duration, fadetime);
+		/*
+		setTimeout(function(){
+			oscillator.stop();
+		}, duration + (fadetime * 1000));*/
 	}
+};
 
-	if (frequency)
-		oscillator.frequency.value = frequency;
-	if (type)
-		oscillator.type = type;
-	if (!fadetime)
-		fadetime = 1;
-	if (callback)
-		oscillator.onended = callback;
+function play_mp3_beep(audio_obj, volume) {
+	if (volume && volume > MIN_LOG_VOL_LIM) {
+		audio_obj.volume = volume;
+		audio_obj.play();
+	}
+};
 
-	if(isFirefox)
-		fadetime = 0;
+function playLeaderTone() {
+	if (rotorhazard.use_mp3_tones) {
+		play_mp3_beep(sound_leader, rotorhazard.indicator_beep_volume);
+	}
+	else {
+		play_beep(75, 1200, rotorhazard.indicator_beep_volume, 'square');
+		setTimeout(function(tone){
+			play_beep(100, 1800, rotorhazard.indicator_beep_volume, 'square');
+		}, 75, 0);
+	}
+};
 
-	oscillator.start();
-	setTimeout(function(fade){
-		gainNode.gain.exponentialRampToValueAtTime(0.00001, globalAudioCtx.currentTime + fade);
-	}, duration, fadetime);
-	/*
-	setTimeout(function(){
-		oscillator.stop();
-	}, duration + (fadetime * 1000));*/
+function playWinnerTone() {
+	if (rotorhazard.use_mp3_tones) {
+		play_mp3_beep(sound_winner, rotorhazard.indicator_beep_volume);
+	}
+	else {
+		play_beep(50, 1200, rotorhazard.indicator_beep_volume, 'square');
+		setTimeout(function(tone) {
+			play_beep(75, 1800, rotorhazard.indicator_beep_volume, 'square');
+		}, 50, 0);
+		setTimeout(function(tone) {
+			play_beep(50, 1200, rotorhazard.indicator_beep_volume, 'square');
+		}, 125, 0);
+		setTimeout(function(tone) {
+			play_beep(75, 1800, rotorhazard.indicator_beep_volume, 'square');
+		}, 175, 0);
+		setTimeout(function(tone) {
+			play_beep(50, 1200, rotorhazard.indicator_beep_volume, 'square');
+		}, 250, 0);
+		setTimeout(function(tone) {
+			play_beep(100, 1800, rotorhazard.indicator_beep_volume, 'square');
+		}, 300, 0);
+	}
+};
+
+function doSpeak(obj) {
+	if (obj.startsWith(LEADER_FLAG_CHAR)) {
+		obj = obj.substring(1);
+		if (rotorhazard.beep_race_leader_lap) {
+			playLeaderTone();
+		}
+	}
+	else if (obj.startsWith(WINNER_FLAG_CHAR)) {
+		obj = obj.substring(1);
+		if (rotorhazard.beep_race_winner_declared) {
+			playWinnerTone();
+		}
+	}
+	if (rotorhazard.voice_volume && rotorhazard.voice_volume > MIN_LOG_VOL_LIM) {
+		if (obj.length > 0) {
+			$(obj).articulate('setVoice','name', rotorhazard.voice_language).articulate('speak');
+			return true;
+		}
+	}
+	return false;
+};
+
+function speak(obj, priority) {
+	if (typeof(priority)=='undefined')
+		priority = false;
+
+	if (priority) {
+		speakObjsQueue.unshift(obj);
+	} else {
+		speakObjsQueue.push(obj);
+	}
 };
 
 function __(text) {
@@ -450,7 +585,13 @@ function __l(text) {
 /* Data model for nodes */
 function nodeModel() {
 	this.trigger_rssi = false;
-	this.frequency = 0;
+	this.fObj = {
+		key: '—',
+		fString: 0,
+		band: null,
+		channel: null,
+		frequency: 0
+	};
 	this.node_peak_rssi = false;
 	this.node_nadir_rssi = false;
 	this.pass_peak_rssi = false;
@@ -476,6 +617,7 @@ function nodeModel() {
 		minValue: 0,
 	});
 	this.series = new TimeSeries();
+	this.crossingSeries = new TimeSeries();
 
 	this.graphPausedTime = false;
 	this.graphPaused = false;
@@ -489,11 +631,11 @@ nodeModel.prototype = {
 
 		var warnings = [];
 
-		if (this.node_nadir_rssi > 0 && this.node_nadir_rssi < this.node_peak_rssi - 40) {
+		if (this.node_nadir_rssi > 0 && this.node_nadir_rssi < this.node_peak_rssi - 20) {
 			// assume node data is invalid unless nadir and peak are minimally separated
 			if (this.enter_at_level > this.node_peak_rssi) {
 				warnings.push(__('EnterAt is higher than NodePeak: <strong>Passes may not register</strong>. <em>Complete a lap pass before adjusting node values.</em>'));
-			} else if (this.enter_at_level > this.node_peak_rssi - 10) {
+			} else if (this.enter_at_level >= this.node_peak_rssi - 5) {
 				warnings.push(__('EnterAt is very near NodePeak: <strong>Passes may not register</strong>. <em>Complete a lap pass before adjusting node values.</em>'));
 			}
 		}
@@ -504,13 +646,13 @@ nodeModel.prototype = {
 
 		if (this.enter_at_level <= this.exit_at_level) {
 			warnings.push(__('EnterAt must be greater than ExitAt: <strong>Passes WILL NOT register correctly</strong>.'));
-		} else if (this.enter_at_level <= this.exit_at_level + 20) {
+		} else if (this.enter_at_level <= this.exit_at_level + 10) {
 			warnings.push(__('EnterAt is very near ExitAt: <strong>Passes may register too frequently</strong>.'));
 		}
 
 		if (this.exit_at_level < this.pass_nadir_rssi) {
 			warnings.push(__('ExitAt is lower than PassNadir: <strong>Passes may not complete</strong>.'));
-		} else if (this.exit_at_level < this.pass_nadir_rssi + 10) {
+		} else if (this.exit_at_level <= this.pass_nadir_rssi + 5) {
 			warnings.push(__('ExitAt is very near PassNadir: <strong>Passes may not complete</strong>.'));
 		}
 
@@ -528,6 +670,10 @@ nodeModel.prototype = {
 			strokeStyle:'hsl(214, 53%, 60%)',
 			fillStyle:'hsla(214, 53%, 60%, 0.4)'
 		});
+		this.graph.addTimeSeries(this.crossingSeries, {lineWidth:1.7,
+			strokeStyle:'none',
+			fillStyle:'hsla(136, 71%, 70%, 0.3)'
+		});
 		this.graph.streamTo(element, 200); // match delay value to heartbeat in server.py
 	},
 	updateThresholds: function(){
@@ -544,6 +690,10 @@ nodeModel.prototype = {
 }
 
 /* Data model for timer */
+const TONES_NONE = 0;
+const TONES_ONE = 1;
+const TONES_ALL = 2;
+
 function timerModel() {
 	// interval control
 	this.interval = 100; // in ms
@@ -563,15 +713,18 @@ function timerModel() {
 	this.running = false;
 	this.zero_time = null; // timestamp for timer's zero point
 	this.hidden_staging = false; // display 'ready' message instead of showing time remaining
+	this.staging_tones = TONES_ALL; // sound tones during staging
+	this.max_delay = Infinity; // don't sound more tones than this even if staging takes longer
 	this.time_s = false; // simplified relative time in seconds
 	this.count_up = false; // use fixed-length timer
 	this.duration = 0; // fixed-length duration, in seconds
+	this.allow_expire = false; // prevent expire callbacks until timer runs 1 loop
 
 	this.drift_history = [];
 	this.drift_history_samples = 10;
 	this.drift_correction = 0;
 
-	this.warn_until = 0;
+	this.warn_until = 0; // display sync warning
 
 	var self = this;
 
@@ -590,7 +743,7 @@ function timerModel() {
 					if (self.time_s <= 0) {
 						continue_timer = false;
 						self.running = false;
-						if (self.callbacks.expire instanceof Function) {
+						if (self.allow_expire && self.callbacks.expire instanceof Function) {
 							self.callbacks.expire(self);
 						}
 					} else {
@@ -622,6 +775,8 @@ function timerModel() {
 				}
 			}
 		}
+
+		self.allow_expire = true;
 
 		if (continue_timer) {
 			var now = window.performance.now()
@@ -748,8 +903,41 @@ function timerModel() {
 	}
 }
 
+function parseIntOrBoolean(str) {
+	if (str == 'false') {
+		return 0
+	}
+	if (str == 'true') {
+		return 1
+	}
+	return JSON.parse(str)
+}
+
 /* rotorhazard object for local settings/storage */
 var rotorhazard = {
+	raceMode: {
+		0: 'Fixed time',
+		1: 'No Time Limit',
+	},
+	startBehavior: {
+		0: 'Hole Shot',
+		1: 'First Lap',
+		2: 'Staggered Start',
+	},
+	winCondition: {
+		1: 'Most Laps in Fastest Time',
+		5: 'Most Laps Only',
+		6: 'Most Laps Only with Overtime',
+		2: 'First to X Laps',
+		3: 'Fastest Lap',
+		4: 'Fastest 3 Consecutive Laps',
+		0: 'None',
+	},
+	stagingTones: {
+		2: 'Each Second',
+		1: 'One',
+		0: 'None',
+	},
 	language_strings: {},
 	interface_language: '',
 	// text-to-speech callout options
@@ -758,17 +946,21 @@ var rotorhazard = {
 	voice_volume: 1.0, // voice call volume
 	voice_rate: 1.25,  // voice call speak pitch
 	voice_pitch: 1.0,  // voice call speak rate
-	voice_callsign: true, // speak pilot callsigns
-	voice_lap_count: true, // speak lap counts
-	voice_team_lap_count: true, // speak team lap counts
-	voice_lap_time: true, // speak lap times
-	voice_race_timer: true, // speak race timer
-	voice_race_winner: true, // speak race winner
+	voice_callsign: 1, // speak pilot callsigns
+	voice_lap_count: 2, // speak pilot lap counts
+	voice_team_lap_count: 1, // speak team lap counts
+	voice_lap_time: 1, // speak lap times
+	voice_race_timer: 2, // speak race timer
+	voice_race_winner: 1, // speak race winner
+	voice_split_timer: 0, // split timer
 
 	tone_volume: 1.0, // race stage/start tone volume
 	beep_crossing_entered: false, // beep node crossing entered
 	beep_crossing_exited: false, // beep node crossing exited
 	beep_manual_lap_button: false, // beep when manual lap button bit
+	beep_race_leader_lap: false, // beep on lap by race leader
+	beep_race_winner_declared: false, // beep on race winner declared
+	beep_cluster_connect: false, // cluster timer connect / disconnect
 	use_mp3_tones: false, //use mp3 tones instead of synthetic tones during Races
 	beep_on_first_pass_button: false, // beep during the first pass where not voice announcment is played
 
@@ -776,11 +968,19 @@ var rotorhazard = {
 	schedule_s: 10, //time in minutes for scheduled races
 	indicator_beep_volume: 0.5, // indicator beep volume
 
+	//display options
+	display_lap_id: false, //enables the display of the lap id
+	display_time_start: false, //shows the timestamp of the lap since the race was started
+	display_time_first_pass: false, //shows the timestamp of the lap since the first pass was recorded
+
 	min_lap: 0, // minimum lap time
 	admin: false, // whether to show admin options in nav
+	show_messages: true, // whether to display messages
 	graphing: false, // currently graphing RSSI
 	primaryPilot: -1, // restrict voice calls to single pilot (default: all)
 	nodes: [], // node array
+	heats: {}, // heats object
+	race_format: {}, // current format object
 
 	panelstates: {}, // collapsible panel state
 
@@ -813,10 +1013,14 @@ var rotorhazard = {
 		localStorage['rotorhazard.voice_lap_time'] = JSON.stringify(this.voice_lap_time);
 		localStorage['rotorhazard.voice_race_timer'] = JSON.stringify(this.voice_race_timer);
 		localStorage['rotorhazard.voice_race_winner'] = JSON.stringify(this.voice_race_winner);
+		localStorage['rotorhazard.voice_split_timer'] = JSON.stringify(this.voice_split_timer);
 		localStorage['rotorhazard.tone_volume'] = JSON.stringify(this.tone_volume);
 		localStorage['rotorhazard.beep_crossing_entered'] = JSON.stringify(this.beep_crossing_entered);
 		localStorage['rotorhazard.beep_crossing_exited'] = JSON.stringify(this.beep_crossing_exited);
 		localStorage['rotorhazard.beep_manual_lap_button'] = JSON.stringify(this.beep_manual_lap_button);
+		localStorage['rotorhazard.beep_race_leader_lap'] = JSON.stringify(this.beep_race_leader_lap);
+		localStorage['rotorhazard.beep_race_winner_declared'] = JSON.stringify(this.beep_race_winner_declared);
+		localStorage['rotorhazard.beep_cluster_connect'] = JSON.stringify(this.beep_cluster_connect);
 		localStorage['rotorhazard.use_mp3_tones'] = JSON.stringify(this.use_mp3_tones);
 		localStorage['rotorhazard.beep_on_first_pass_button'] = JSON.stringify(this.beep_on_first_pass_button);
 		localStorage['rotorhazard.schedule_m'] = JSON.stringify(this.schedule_m);
@@ -825,6 +1029,9 @@ var rotorhazard = {
 		localStorage['rotorhazard.min_lap'] = JSON.stringify(this.min_lap);
 		localStorage['rotorhazard.admin'] = JSON.stringify(this.admin);
 		localStorage['rotorhazard.primaryPilot'] = JSON.stringify(this.primaryPilot);
+		localStorage['rotorhazard.display_lap_id'] = JSON.stringify(this.display_lap_id);
+		localStorage['rotorhazard.display_time_start'] = JSON.stringify(this.display_time_start);
+		localStorage['rotorhazard.display_time_first_pass'] = JSON.stringify(this.display_time_first_pass);
 		return true;
 	},
 	restoreData: function(dataType) {
@@ -845,22 +1052,25 @@ var rotorhazard = {
 				this.voice_pitch = JSON.parse(localStorage['rotorhazard.voice_pitch']);
 			}
 			if (localStorage['rotorhazard.voice_callsign']) {
-				this.voice_callsign = JSON.parse(localStorage['rotorhazard.voice_callsign']);
+				this.voice_callsign = parseIntOrBoolean(localStorage['rotorhazard.voice_callsign']);
 			}
 			if (localStorage['rotorhazard.voice_lap_count']) {
-				this.voice_lap_count = JSON.parse(localStorage['rotorhazard.voice_lap_count']);
+				this.voice_lap_count = parseIntOrBoolean(localStorage['rotorhazard.voice_lap_count']);
 			}
 			if (localStorage['rotorhazard.voice_team_lap_count']) {
-				this.voice_team_lap_count = JSON.parse(localStorage['rotorhazard.voice_team_lap_count']);
+				this.voice_team_lap_count = parseIntOrBoolean(localStorage['rotorhazard.voice_team_lap_count']);
 			}
 			if (localStorage['rotorhazard.voice_lap_time']) {
-				this.voice_lap_time = JSON.parse(localStorage['rotorhazard.voice_lap_time']);
+				this.voice_lap_time = parseIntOrBoolean(localStorage['rotorhazard.voice_lap_time']);
 			}
 			if (localStorage['rotorhazard.voice_race_timer']) {
-				this.voice_race_timer = JSON.parse(localStorage['rotorhazard.voice_race_timer']);
+				this.voice_race_timer = parseIntOrBoolean(localStorage['rotorhazard.voice_race_timer']);
 			}
 			if (localStorage['rotorhazard.voice_race_winner']) {
-				this.voice_race_winner = JSON.parse(localStorage['rotorhazard.voice_race_winner']);
+				this.voice_race_winner = parseIntOrBoolean(localStorage['rotorhazard.voice_race_winner']);
+			}
+			if (localStorage['rotorhazard.voice_split_timer']) {
+				this.voice_split_timer = JSON.parse(localStorage['rotorhazard.voice_split_timer']);
 			}
 			if (localStorage['rotorhazard.tone_volume']) {
 				this.tone_volume = JSON.parse(localStorage['rotorhazard.tone_volume']);
@@ -873,6 +1083,15 @@ var rotorhazard = {
 			}
 			if (localStorage['rotorhazard.beep_manual_lap_button']) {
 				this.beep_manual_lap_button = JSON.parse(localStorage['rotorhazard.beep_manual_lap_button']);
+			}
+			if (localStorage['rotorhazard.beep_race_leader_lap']) {
+				this.beep_race_leader_lap = JSON.parse(localStorage['rotorhazard.beep_race_leader_lap']);
+			}
+			if (localStorage['rotorhazard.beep_race_winner_declared']) {
+				this.beep_race_winner_declared = JSON.parse(localStorage['rotorhazard.beep_race_winner_declared']);
+			}
+			if (localStorage['rotorhazard.beep_cluster_connect']) {
+				this.beep_cluster_connect = JSON.parse(localStorage['rotorhazard.beep_cluster_connect']);
 			}
 			if (localStorage['rotorhazard.use_mp3_tones']) {
 				this.use_mp3_tones = JSON.parse(localStorage['rotorhazard.use_mp3_tones']);
@@ -898,6 +1117,15 @@ var rotorhazard = {
 			if (localStorage['rotorhazard.primaryPilot']) {
 				this.primaryPilot = JSON.parse(localStorage['rotorhazard.primaryPilot']);
 			}
+			if (localStorage['rotorhazard.display_lap_id']) {
+				this.display_lap_id = JSON.parse(localStorage['rotorhazard.display_lap_id']);
+			}
+			if (localStorage['rotorhazard.display_time_start']) {
+				this.display_time_start = JSON.parse(localStorage['rotorhazard.display_time_start']);
+			}
+			if (localStorage['rotorhazard.display_time_first_pass']) {
+				this.display_time_first_pass = JSON.parse(localStorage['rotorhazard.display_time_first_pass']);
+			}
 			return true;
 		}
 		return false;
@@ -906,12 +1134,12 @@ var rotorhazard = {
 
 // deferred timer callbacks (time until race)
 rotorhazard.timer.deferred.callbacks.start = function(timer){
-	if (rotorhazard.timer.staging.running || rotorhazard.timer.race.running) {  // defer timing to staging/race timers
+	if (rotorhazard.timer.race.running) {  // defer timing to staging/race timers
 		rotorhazard.timer.deferred.stop();
 	}
 }
 rotorhazard.timer.deferred.callbacks.step = function(timer){
-	if (rotorhazard.voice_race_timer) {
+	if (rotorhazard.voice_race_timer != 0) {
 		if (timer.time_s < -3600 && !(timer.time_s % -3600)) { // 2+ hour callout
 			var hours = timer.time_s / -3600;
 			speak('<div>' + __l('Next race begins in') + ' ' + hours + ' ' + __l('Hours') + '</div>', true);
@@ -946,31 +1174,45 @@ rotorhazard.timer.deferred.callbacks.expire = function(timer){
 rotorhazard.timer.race.callbacks.start = function(timer){
 	$('.time-display').html(timer.renderHTML());
 	rotorhazard.timer.deferred.stop(); // cancel lower priority timer
+	if (timer.staging_tones == TONES_ONE
+		&& timer.max_delay >= 1) {
+		// beep on start if single staging tone
+		if (rotorhazard.use_mp3_tones) {
+			play_mp3_beep(sound_stage, rotorhazard.tone_volume);
+		}
+		else {
+			play_beep(100, 440, rotorhazard.tone_volume, 'triangle');
+		}
+	}
 }
 rotorhazard.timer.race.callbacks.step = function(timer){
 	if (timer.warn_until < window.performance.now()) {
 		$('.timing-clock .warning').hide();
 	}
-	if (timer.time_s < 0) {
-		if (timer.hidden_staging) {
+	if (timer.time_s < 0
+		&& timer.time_s >= -timer.max_delay) {
+		// time before race begins (staging)
+		if (timer.hidden_staging
+			&& timer.staging_tones == TONES_ALL) {
 			// beep every second during staging if timer is hidden
 			if (timer.time_s * 10 % 10 == 0) {
-				if( rotorhazard.use_mp3_tones){
-					sound_stage.play();
+				if (rotorhazard.use_mp3_tones) {
+					play_mp3_beep(sound_stage, rotorhazard.tone_volume);
 				}
 				else {
 					play_beep(100, 440, rotorhazard.tone_volume, 'triangle');
 				}
 			}
-		} else if (timer.time_s == 30
-			|| timer.time_s == 20
-			|| timer.time_s == 10) {
-			speak('<div>' + __l('Starting in') + ' ' + timer.time_s + ' ' + __l('Seconds') + '</div>', true);
-		} else if (timer.time_s <= 5) {
+		} else if (timer.time_s == -30
+			|| timer.time_s == -20
+			|| timer.time_s == -10) {
+			speak('<div>' + __l('Starting in') + ' ' + (-timer.time_s) + ' ' + __l('Seconds') + '</div>', true);
+		} else if (timer.staging_tones == TONES_ALL
+			&& timer.time_s >= -5) {
 			// staging beep for last 5 seconds before start
 			if (timer.time_s * 10 % 10 == 0) {
-				if( rotorhazard.use_mp3_tones){
-					sound_stage.play();
+				if (rotorhazard.use_mp3_tones) {
+					play_mp3_beep(sound_stage, rotorhazard.tone_volume);
 				}
 				else {
 					play_beep(100, 440, rotorhazard.tone_volume, 'triangle');
@@ -981,8 +1223,8 @@ rotorhazard.timer.race.callbacks.step = function(timer){
 		(!timer.count_up && timer.time_s == timer.duration)
 		) {
 		// play start tone
-		if( rotorhazard.use_mp3_tones){
-			sound_buzzer.play();
+		if (rotorhazard.use_mp3_tones) {
+			play_mp3_beep(sound_buzzer, rotorhazard.tone_volume);
 		}
 		else {
 			play_beep(700, 880, rotorhazard.tone_volume, 'triangle', 0.25);
@@ -991,20 +1233,21 @@ rotorhazard.timer.race.callbacks.step = function(timer){
 		if (!timer.count_up) {
 			if (timer.time_s <= 5) { // Final seconds
 				if (timer.time_s * 10 % 10 == 0) {
-					if( rotorhazard.use_mp3_tones){
-						sound_stage.play();
+					if (rotorhazard.use_mp3_tones) {
+						play_mp3_beep(sound_stage, rotorhazard.tone_volume);
 					}
 					else {
 						play_beep(100, 440, rotorhazard.tone_volume, 'triangle');
 					}
 				}
 			} else if (timer.time_s == 10) { // announce 10s only when counting down
-				if (rotorhazard.voice_race_timer)
+				if (rotorhazard.voice_race_timer != 0)
 					speak('<div>10 ' + __l('Seconds') + '</div>', true);
 			}
 		}
 
-		if (rotorhazard.voice_race_timer) {
+		if (rotorhazard.voice_race_timer == 1 ||
+				(rotorhazard.voice_race_timer == 2 && (!timer.count_up))) {
 			if (timer.time_s > 3600 && !(timer.time_s % 3600)) { // 2+ hour callout (endurance)
 				var hours = timer.time_s / 3600;
 				speak('<div>' + hours + ' ' + __l('Hours') + '</div>', true);
@@ -1026,8 +1269,8 @@ rotorhazard.timer.race.callbacks.step = function(timer){
 }
 rotorhazard.timer.race.callbacks.expire = function(timer){
 	// play expired tone
-	if( rotorhazard.use_mp3_tones){
-		sound_buzzer.play();
+	if (rotorhazard.use_mp3_tones) {
+		play_mp3_beep(sound_buzzer, rotorhazard.tone_volume);
 	}
 	else {
 		play_beep(700, 880, rotorhazard.tone_volume, 'triangle', 0.25);
@@ -1046,98 +1289,117 @@ var standard_message_queue = [];
 var interrupt_message_queue = [];
 
 function get_standard_message() {
-	msg = standard_message_queue[0];
-	$('#banner-msg .message').html(msg);
-	$('#banner-msg').slideDown();
+	if (rotorhazard.show_messages) {
+		msg = standard_message_queue[0];
+		$('#banner-msg .message').html(msg);
+		$('#banner-msg').slideDown();
+	}
 }
 
 function get_interrupt_message() {
-	msg = interrupt_message_queue[0];
+	if (rotorhazard.show_messages) {
+		msg = interrupt_message_queue[0];
 
-	var message_el = $('<div class="priority-message-interrupt popup">');
-	message_el.append('<h2>' + __('Alert') + '</h2>');
-	message_el.append('<div class="popup-content"><p>' + msg + '</p></div>');
+		var message_el = $('<div class="priority-message-interrupt popup">');
+		message_el.append('<h2>' + __('Alert') + '</h2>');
+		message_el.append('<div class="popup-content"><p>' + msg + '</p></div>');
 
-	$.magnificPopup.open({
-		items: {
-			src: message_el,
-			type: 'inline',
-		},
-		callbacks: {
-			afterClose: function(){
-				interrupt_message_queue.shift()
-				if (interrupt_message_queue.length)
-					get_interrupt_message()
+		$.magnificPopup.open({
+			items: {
+				src: message_el,
+				type: 'inline',
+			},
+			callbacks: {
+				afterClose: function(){
+					interrupt_message_queue.shift()
+					if (interrupt_message_queue.length)
+						get_interrupt_message()
+				}
 			}
-		}
+		});
+	}
+}
+
+function init_popup_generics() {
+	$('.open-mfp-popup').magnificPopup({
+		type:'inline',
+		midClick: true,
 	});
 }
 
+// restore local settings
+if ($() && $().articulate('getVoices')[0] && $().articulate('getVoices')[0].name) {
+	rotorhazard.voice_language = $().articulate('getVoices')[0].name; // set default voice
+}
+rotorhazard.restoreData();
+
 if (typeof jQuery != 'undefined') {
 jQuery(document).ready(function($){
-	// restore local settings
-	rotorhazard.voice_language = $().articulate('getVoices')[0].name; // set default voice
-	rotorhazard.restoreData();
-
+	// display admin options
 	if (rotorhazard.admin) {
 		$('*').removeClass('admin-hide');
 	}
 
-	// header collapsing (hamburger)
-	$('#timer-name').after('<button class="hamburger">' + __('Menu') + '</button>');
+	// populate SVG logo
+	$('.rh-logo').html(svg_asset.logo);
 
-	$('.hamburger').on('click', function(event) {
-		if ($('body').hasClass('nav-over')) {
-			$('#header-extras').css('display', '');
-			$('#nav-main').css('display', '');
-			$('body').removeClass('nav-over');
-		} else {
+	// header collapsing (hamburger)
+	if ($('#nav-main').length) {
+		$('#timer-name').after('<button class="hamburger">' + __('Menu') + '</button>');
+
+		$('.hamburger').on('click', function(event) {
+			if ($('body').hasClass('nav-over')) {
+				$('#header-extras').css('display', '');
+				$('#nav-main').css('display', '');
+				$('body').removeClass('nav-over');
+			} else {
+				$('#header-extras').show();
+				$('#nav-main').show();
+				$('body').addClass('nav-over');
+			}
+		});
+
+		$('.hamburger').on('mouseenter', function(event){
 			$('#header-extras').show();
 			$('#nav-main').show();
-			$('body').addClass('nav-over');
-		}
-	});
+			setTimeout(function(){
+				$('body').addClass('nav-over');
+			}, 1);
+		});
 
-	$('.hamburger').on('mouseenter', function(event){
-		$('#header-extras').show();
-		$('#nav-main').show();
-		setTimeout(function(){
-			$('body').addClass('nav-over');
-		}, 1);
-	});
-
-	$('body>header').on('mouseleave', function(event){
-		$('#header-extras').css('display', '');
-		$('#nav-main').css('display', '');
-		$('body').removeClass('nav-over');
-	});
-
-	$(document).on('click', function(event) {
-		if (!$(event.target).closest('body>header').length) {
+		$('body>header').on('mouseleave', function(event){
 			$('#header-extras').css('display', '');
 			$('#nav-main').css('display', '');
 			$('body').removeClass('nav-over');
-		}
-	});
+		});
 
-	// Accessible dropdown menu
-	$('#nav-main>ul').setup_navigation();
+		$(document).on('click', function(event) {
+			if (!$(event.target).closest('body>header').length) {
+				$('#header-extras').css('display', '');
+				$('#nav-main').css('display', '');
+				$('body').removeClass('nav-over');
+			}
+		});
 
-	var $menu = $('#menu'),
-		$menulink = $('.menu-link'),
-		$menuTrigger = $('.has-subnav > a');
+		// Accessible dropdown menu
+		$('#nav-main>ul').setup_navigation();
 
-	$menulink.click(function(e) {
-		e.preventDefault();
-		$menulink.toggleClass('active');
-		$menu.toggleClass('active');
-	});
+		var $menu = $('#menu'),
+			$menulink = $('.menu-link'),
+			$menuTrigger = $('.has-subnav > a');
 
-	$menuTrigger.click(function(e) {
-		e.preventDefault();
-		var $this = $(this);
-		$this.toggleClass('active').next('ul').toggleClass('active');
-	});
+		$menulink.click(function(e) {
+			e.preventDefault();
+			$menulink.toggleClass('active');
+			$menu.toggleClass('active');
+		});
+
+		$menuTrigger.click(function(e) {
+			e.preventDefault();
+			var $this = $(this);
+			$this.toggleClass('active').next('ul').toggleClass('active');
+		});
+	}
 
 	// responsive tables
 	$('table').wrap('<div class="table-wrap">');
@@ -1185,10 +1447,7 @@ jQuery(document).ready(function($){
 	});
 
 	// Popup generics
-	$('.open-mfp-popup').magnificPopup({
-		type:'inline',
-		midClick: true,
-	});
+	init_popup_generics();
 
 	$('.cancel').click(function() {
 		$.magnificPopup.close();
@@ -1197,6 +1456,16 @@ jQuery(document).ready(function($){
 	// startup socket connection
 	socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port);
 
+	// reconnect when visibility is regained
+	$(document).on('visibilitychange', function(){
+		if (!document['hidden']) {
+			if (!socket.connected) {
+ 				socket.connect();
+			}
+		}
+	});
+
+	// popup messaging
 	socket.on('priority_message', function (msg) {
 		if (msg.interrupt) {
 			interrupt_message_queue.push(msg.message);
@@ -1232,33 +1501,60 @@ jQuery(document).ready(function($){
 			}
 		}
 	};
+
+	// hard reset
+	socket.on('database_restore_done', function (msg) {
+		location.reload();
+	});
+
+	// load needed data from server when required
+	socket.on('load_all', function (msg) {
+		if (typeof(data_dependencies) != "undefined") {
+			socket.emit('load_data', {'load_types': data_dependencies});
+		}
+	});
+
+	// store language strings
+	socket.on('all_languages', function (msg) {
+		rotorhazard.language_strings = msg.languages;
+	});
 });
 }
 
 /* Leaderboards */
-function build_leaderboard(leaderboard, display_type, meta) {
+function build_leaderboard(leaderboard, display_type, meta, display_starts=false) {
 	if (typeof(display_type) === 'undefined')
 		display_type = 'by_race_time';
 	if (typeof(meta) === 'undefined') {
 		meta = new Object;
 		meta.team_racing_mode = false;
+		meta.start_behavior = 0;
+	}
+
+	if (meta.start_behavior == 2) {
+		var total_label = __('Laps Total');
+	} else {
+		var total_label = __('Total');
 	}
 
 	var twrap = $('<div class="responsive-wrap">');
 	var table = $('<table class="leaderboard">');
 	var header = $('<thead>');
 	var header_row = $('<tr>');
-	header_row.append('<th class="pos">' + __('Pos.') + '</th>');
+	header_row.append('<th class="pos"><span class="screen-reader-text">' + __('Rank') + '</span></th>');
 	header_row.append('<th class="pilot">' + __('Pilot') + '</th>');
 	if (meta.team_racing_mode) {
 		header_row.append('<th class="team">' + __('Team') + '</th>');
+	}
+	if (display_starts == true) {
+		header_row.append('<th class="starts">' + __('Starts') + '</th>');
 	}
 	if (display_type == 'by_race_time' ||
 		display_type == 'heat' ||
 		display_type == 'round' ||
 		display_type == 'current') {
 		header_row.append('<th class="laps">' + __('Laps') + '</th>');
-		header_row.append('<th class="total">' + __('Total') + '</th>');
+		header_row.append('<th class="total">' + total_label + '</th>');
 		header_row.append('<th class="avg">' + __('Avg.') + '</th>');
 	}
 	if (display_type == 'by_fastest_lap' ||
@@ -1286,6 +1582,9 @@ function build_leaderboard(leaderboard, display_type, meta) {
 		if (meta.team_racing_mode) {
 			row.append('<td class="team">'+ leaderboard[i].team_name +'</td>');
 		}
+		if (display_starts == true) {
+			row.append('<td class="starts">'+ leaderboard[i].starts +'</td>');
+		}
 		if (display_type == 'by_race_time' ||
 		display_type == 'heat' ||
 		display_type == 'round' ||
@@ -1295,7 +1594,11 @@ function build_leaderboard(leaderboard, display_type, meta) {
 				lap = '&#8212;';
 			row.append('<td class="laps">'+ lap +'</td>');
 
-			var lap = leaderboard[i].total_time;
+			if (meta.start_behavior == 2) {
+				var lap = leaderboard[i].total_time_laps;
+			} else {
+				var lap = leaderboard[i].total_time;
+			}
 			if (!lap || lap == '0:00.000')
 				lap = '&#8212;';
 			row.append('<td class="total">'+ lap +'</td>');
@@ -1312,13 +1615,110 @@ function build_leaderboard(leaderboard, display_type, meta) {
 			var lap = leaderboard[i].fastest_lap;
 			if (!lap || lap == '0:00.000')
 				lap = '&#8212;';
-			row.append('<td class="fast">'+ lap +'</td>');
+			if (leaderboard[i].fastest_lap_source) {
+				var source = leaderboard[i].fastest_lap_source;
+				row.append('<td class="fast">'+ lap +'</td>');
+
+				if (source.note) {
+					var source_text = source.note
+				} else {
+					var source_text = __('Heat') + ' ' + source.heat;
+				}
+				source_text += ' / ' + __('Round') + ' ' + source.round;
+
+				row.data('source', source_text);
+				row.attr('title', source_text);
+			} else {
+				row.append('<td class="fast">'+ lap +'</td>');
+			}
+
 		}
 		if (display_type == 'by_consecutives' ||
 		display_type == 'heat' ||
 		display_type == 'round' ||
 		display_type == 'current') {
 			var lap = leaderboard[i].consecutives;
+			if (!lap || lap == '0:00.000')
+				lap = '&#8212;';
+			if (leaderboard[i].consecutives_source) {
+				var source = leaderboard[i].consecutives_source;
+				row.append('<td class="consecutive">'+ lap +'</td>');
+
+				if (source.note) {
+					var source_text = source.note;
+				} else {
+					var source_text = __('Heat') + ' ' + source.heat;
+				}
+				source_text += ' / ' + __('Round') + ' ' + source.round;
+
+				row.data('source', source_text);
+				row.attr('title', source_text);
+			} else {
+				row.append('<td class="consecutive">'+ lap +'</td>');
+			}
+		}
+
+		body.append(row);
+	}
+
+	table.append(body);
+	twrap.append(table);
+	return twrap;
+}
+function build_team_leaderboard(leaderboard, display_type, meta) {
+	if (typeof(display_type) === 'undefined')
+		display_type = 'by_race_time';
+	if (typeof(meta) === 'undefined') {
+		meta = new Object;
+		meta.team_racing_mode = true;
+	}
+
+	var twrap = $('<div class="responsive-wrap">');
+	var table = $('<table class="leaderboard">');
+	var header = $('<thead>');
+	var header_row = $('<tr>');
+	header_row.append('<th class="pos"><span class="screen-reader-text">' + __('Rank') + '</span></th>');
+	header_row.append('<th class="team">' + __('Team') + '</th>');
+	header_row.append('<th class="contribution">' + __('Contributors') + '</th>');
+	if (display_type == 'by_race_time') {
+		header_row.append('<th class="laps">' + __('Laps') + '</th>');
+		header_row.append('<th class="total">' + __('Average Lap') + '</th>');
+	}
+	if (display_type == 'by_avg_fastest_lap') {
+		header_row.append('<th class="fast">' + __('Average Fastest') + '</th>');
+	}
+	if (display_type == 'by_avg_consecutives') {
+		header_row.append('<th class="consecutive">' + __('Average 3 Consecutive') + '</th>');
+	}
+	header.append(header_row);
+	table.append(header);
+
+	var body = $('<tbody>');
+
+	for (var i in leaderboard) {
+		var row = $('<tr>');
+		row.append('<td class="pos">'+ leaderboard[i].position +'</td>');
+		row.append('<td class="team">'+ leaderboard[i].name +'</td>');
+		row.append('<td class="contribution">'+ leaderboard[i].contributing + '/' + leaderboard[i].members + '</td>');
+		if (display_type == 'by_race_time') {
+			var lap = leaderboard[i].laps;
+			if (!lap || lap == '0:00.000')
+				lap = '&#8212;';
+			row.append('<td class="laps">'+ lap +'</td>');
+
+			var lap = leaderboard[i].average_lap;
+			if (!lap || lap == '0:00.000')
+				lap = '&#8212;';
+			row.append('<td class="total">'+ lap +'</td>');
+		}
+		if (display_type == 'by_avg_fastest_lap') {
+			var lap = leaderboard[i].average_fastest_lap;
+			if (!lap || lap == '0:00.000')
+				lap = '&#8212;';
+			row.append('<td class="fast">'+ lap +'</td>');
+		}
+		if (display_type == 'by_avg_consecutives') {
+			var lap = leaderboard[i].average_consecutives;
 			if (!lap || lap == '0:00.000')
 				lap = '&#8212;';
 			row.append('<td class="consecutive">'+ lap +'</td>');
@@ -1334,7 +1734,6 @@ function build_leaderboard(leaderboard, display_type, meta) {
 /* Frequency Table */
 var freq = {
 	frequencies: {
-		'—': 0,
 		R1: 5658,
 		R2: 5695,
 		R3: 5732,
@@ -1393,31 +1792,147 @@ var freq = {
 		U7: 5438,
 		U8: 5456,
 		U9: 5985,
-		'N/A': 'n/a'
+		D1: 5660,
+		D2: 5695,
+		D3: 5735,
+		D4: 5770,
+		D5: 5805,
+		D6: 5880,
+		D7: 5914,
+		D8: 5839,
+		J1: 5695,
+		J2: 5770,
+		J3: 5880,
+		S1: 5660,
+		S2: 5695,
+		S3: 5735,
+		S4: 5770,
+		S5: 5805,
+		S6: 5839,
+		S7: 5878,
+		S8: 5914,
 	},
-	findByFreq: function(frequency) {
+	getFObjbyFData: function(fData) {
 		var keyNames = Object.keys(this.frequencies);
-		for (var i in keyNames) {
-			if (this.frequencies[keyNames[i]] == frequency) {
-				return keyNames[i];
+
+		if (fData.frequency == 0) {
+			return {
+				key: '—',
+				fString: 0,
+				band: null,
+				channel: null,
+				frequency: 0
+			}
+		}
+
+		var fKey = "" + fData.band + fData.channel;
+		if (fKey in this.frequencies) {
+			if (this.frequencies[fKey] == fData.frequency) {
+				return {
+					key: fKey,
+					fString: fKey + ':' + this.frequencies[fKey],
+					band: fData.band,
+					channel: fData.channel,
+					frequency: fData.frequency
+				}
+			}
+		}
+
+		return this.findByFreq(fData.frequency)
+	},
+	getFObjbyKey: function(key) {
+		var regex = /([A-Za-z]*)([0-9]*)/;
+		var parts = key.match(regex);
+		if (parts && parts.length == 3) {
+			return {
+				key: key,
+				fString: key + ':' + this.frequencies[key],
+				band: parts[1],
+				channel: parts[2],
+				frequency: this.frequencies[key]
 			}
 		}
 		return false;
 	},
-	buildSelect: function() {
-		var output = '';
-		var keyNames = Object.keys(this.frequencies);
-		for (var i in keyNames) {
-			if (this.frequencies[keyNames[i]] == 0) {
-				output += '<option value="0">' + __('Disabled') + '</option>';
-			} else if (this.frequencies[keyNames[i]] == 'n/a') {
-				output += '<option value="n/a">' + __('N/A') + '</option>';
-			} else {
-				output += '<option value="' + this.frequencies[keyNames[i]] + '">' + keyNames[i] + ' ' + this.frequencies[keyNames[i]] + '</option>';
+	getFObjbyFString: function(fstring) {
+		if (fstring == 0) {
+			return {
+				key: '—',
+				fString: 0,
+				band: null,
+				channel: null,
+				frequency: 0
 			}
 		}
+
+		if (fstring == "n/a") {
+			return {
+				key: __("X"),
+				fString: "n/a",
+				band: null,
+				channel: null,
+				frequency: frequency
+			}
+		}
+		var regex = /([A-Za-z]*)([0-9]*):([0-9]{4})/;
+		var parts = fstring.match(regex);
+		if (parts && parts.length == 4) {
+			return {
+				key: "" + parts[1] + parts[2],
+				fString: fstring,
+				band: parts[1],
+				channel: parts[2],
+				frequency: parts[3]
+			}
+		}
+		return false;
+	},
+	getFObjbyKey: function(key) {
+		var regex = /([A-Za-z]*)([0-9]*)/;
+		var parts = key.match(regex);
+		return {
+			key: key,
+			fString: key + ':' + this.frequencies[key],
+			band: parts[1],
+			channel: parts[2],
+			frequency: this.frequencies[key]
+		}
+	},
+	findByFreq: function(frequency) {
+		if (frequency == 0) {
+			return {
+				key: '—',
+				fString: 0,
+				band: null,
+				channel: null,
+				frequency: 0
+			}
+		}
+		var keyNames = Object.keys(this.frequencies);
+		for (var i in keyNames) {
+			if (this.frequencies[keyNames[i]] == frequency) {
+				var fObj = this.getFObjbyKey(keyNames[i]);
+				if (fObj) return fObj;
+			}
+		}
+		return {
+			key: __("X"),
+			fString: "n/a",
+			band: null,
+			channel: null,
+			frequency: frequency
+		}
+	},
+	buildSelect: function() {
+		var output = '<option value="0">' + __('Disabled') + '</option>';
+		var keyNames = Object.keys(this.frequencies);
+		for (var i in keyNames) {
+			output += '<option value="' + keyNames[i] + ':' + this.frequencies[keyNames[i]] + '">' + keyNames[i] + ' ' + this.frequencies[keyNames[i]] + '</option>';
+		}
+		output += '<option value="n/a">' + __('N/A') + '</option>';
 		return output;
 	},
+	/*
 	updateSelects: function() {
 		for (var i in rotorhazard.nodes) {
 			var freqExists = $('#f_table_' + i + ' option[value=' + rotorhazard.nodes[i].frequency + ']').length;
@@ -1428,16 +1943,84 @@ var freq = {
 			}
 		}
 	},
+	*/
+	updateBlock: function(fObj, node_idx) {
+		// populate channel block
+		var channelBlock = $('.channel-block[data-node="' + node_idx + '"]');
+		if (fObj.frequency == 0) {
+			channelBlock.children('.ch').html('—');
+			channelBlock.children('.fr').html('');
+		} else {
+			channelBlock.children('.ch').html(fObj.key);
+			channelBlock.children('.fr').html(fObj.frequency);
+		}
+	},
 	updateBlocks: function() {
 		// populate channel blocks
 		for (var i in rotorhazard.nodes) {
-			var channelBlock = $('.channel-block[data-node="' + i + '"]');
-			channelBlock.children('.ch').html(this.findByFreq(rotorhazard.nodes[i].frequency));
-			if (rotorhazard.nodes[i].frequency == 0) {
-				channelBlock.children('.fr').html('');
-			} else {
-				channelBlock.children('.fr').html(rotorhazard.nodes[i].frequency);
-			}
+			this.updateBlock(rotorhazard.nodes[i].fObj, i);
 		}
 	}
 }
+
+/* Color picker */
+var color_picker_el = $('<div id="color-picker" class="popup">');
+color_picker_el.append('<h2>' + __('Select Color') + '</h2>');
+color_picker_el.append('<div id="color-picker-swatch">');
+color_picker_el.append('<input type="range" id="color-picker-hue" min="0" max="359">');
+color_picker_el.append('<input type="range" id="color-picker-sat" min="0" max="100">');
+color_picker_el.append('<input type="range" id="color-picker-lum" min="25" max="100">');
+color_picker_el.append('<button id="color-picker-confirm">' + __('Select') + '</button>');
+
+function color_picker(loadColor=false, callback=false) {
+	$.magnificPopup.open({
+		items: {
+			src: color_picker_el,
+			type: 'inline',
+		},
+		closeOnBgClick: false,
+		showCloseBtn: false,
+		enableEscapeKey: true,
+		callbacks: {
+			open: function() {
+				if (loadColor) {
+					hslObj = hexToHsl(loadColor)
+					$('#color-picker-hue').val(hslObj.h)
+					$('#color-picker-sat').val(hslObj.s)
+					$('#color-picker-lum').val(hslObj.l)
+				} else {
+					$('#color-picker-hue').val(212)
+					$('#color-picker-sat').val(100)
+					$('#color-picker-lum').val(50)
+				}
+				$('html').css('--color-picker-hue', $('#color-picker-hue').val());
+				$('html').css('--color-picker-sat', $('#color-picker-sat').val() + '%');
+				$('html').css('--color-picker-lum', $('#color-picker-lum').val() + '%');
+			},
+			beforeClose: function() {
+				var hue = $('#color-picker-hue').val()
+				var sat = $('#color-picker-sat').val()
+				var lum = $('#color-picker-lum').val()
+				if (typeof callback === 'function') {
+					callback(hue, sat, lum);
+				}
+			}
+		}
+	});
+}
+
+$(document).on('input', '#color-picker-hue', function (event) {
+	$('html').css('--color-picker-hue', $('#color-picker-hue').val());
+});
+
+$(document).on('input', '#color-picker-sat', function (event) {
+	$('html').css('--color-picker-sat', $('#color-picker-sat').val() + '%');
+});
+
+$(document).on('input', '#color-picker-lum', function (event) {
+	$('html').css('--color-picker-lum', $('#color-picker-lum').val() + '%');
+});
+
+$(document).on('click', '#color-picker-confirm', function(){
+	$.magnificPopup.close();
+})

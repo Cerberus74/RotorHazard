@@ -1,2 +1,16 @@
 /Gemfile.lock
 /*.bin
+/*.gcda
+/*.gcno
+/.settings
+/.cproject
+/.project
+/Release/
+/build_arduino/
+/build_stm32/
+/build_stm32_f4/
+/spec.d
+/core
+/libraries
+/sloeber.ino.cpp
+/build/

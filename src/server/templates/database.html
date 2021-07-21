@@ -1,4 +1,4 @@
-{% extends "layout.html" %} {% block title %}Database{% endblock %} {% block content %}
+{% extends "layout.html" %} {% block title %}{{ __('Database') }}{% endblock %} {% block content %}
 <main class="page-database">
 <h2>{{ __('Pilots') }}</h2>
 <table class="table">
@@ -12,7 +12,7 @@
         </tr>
     </thead>
     <tbody>
-        {% for pilot in pilots.query.all() %}
+        {% for pilot in pilots %}
         <tr>
             <td>{{ pilot.id }}</td>
             <td>{{ pilot.callsign }}</td>
@@ -29,22 +29,38 @@
     <thead>
         <tr>
             <th>{{ __('ID') }}</th>
-            <th>{{ __('Heat ID') }}</th>
-            <th>{{ __('Node Index') }}</th>
-            <th>{{ __('Pilot ID') }}</th>
             <th>{{ __('Note') }}</th>
             <th>{{ __('Class ID') }}</th>
         </tr>
     </thead>
     <tbody>
-        {% for heat in heats.query.all() %}
+        {% for heat in heats %}
         <tr>
             <td>{{ heat.id }}</td>
-            <td>{{ heat.heat_id }}</td>
-            <td>{{ heat.node_index }}</td>
-            <td>{{ heat.pilot_id }}</td>
             <td>{{ heat.note }}</td>
             <td>{{ heat.class_id }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+
+<h2>{{ __('Heat Nodes') }}</h2>
+<table class="table">
+    <thead>
+        <tr>
+            <th>{{ __('ID') }}</th>
+            <th>{{ __('Heat ID') }}</th>
+            <th>{{ __('Node') }}</th>
+            <th>{{ __('Pilot ID') }}</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for heatnode in heatnodes %}
+        <tr>
+            <td>{{ heatnode.id }}</td>
+            <td>{{ heatnode.heat_id }}</td>
+            <td>{{ heatnode.node_index }}</td>
+            <td>{{ heatnode.pilot_id }}</td>
         </tr>
         {% endfor %}
     </tbody>
@@ -61,40 +77,12 @@
         </tr>
     </thead>
     <tbody>
-        {% for raceclass in race_class.query.all() %}
+        {% for raceclass in race_class %}
         <tr>
             <td>{{ raceclass.id }}</td>
             <td>{{ raceclass.name }}</td>
             <td>{{ raceclass.description }}</td>
             <td>{{ raceclass.format_id }}</td>
-        </tr>
-        {% endfor %}
-    </tbody>
-</table>
-
-<h2>{{ __('Current Laps') }}</h2>
-<table class="table">
-    <thead>
-        <tr>
-            <th>{{ __('ID') }}</th>
-            <th>{{ __('Node Index') }}</th>
-            <th>{{ __('Pilot ID') }}</th>
-            <th>{{ __('Lap ID') }}</th>
-            <th>{{ __('Lap Time Stamp') }}</th>
-            <th>{{ __('Lap Time') }}</th>
-            <th>{{ __('Lap Time Formatted') }}</th>
-        </tr>
-    </thead>
-    <tbody>
-        {% for currentlap in currentlaps.query.all() %}
-        <tr>
-            <td>{{ currentlap.id }}</td>
-            <td>{{ currentlap.node_index }}</td>
-            <td>{{ currentlap.pilot_id }}</td>
-            <td>{{ currentlap.lap_id }}</td>
-            <td>{{ currentlap.lap_time_stamp }}</td>
-            <td>{{ currentlap.lap_time }}</td>
-            <td>{{ currentlap.lap_time_formatted }}</td>
         </tr>
         {% endfor %}
     </tbody>
@@ -117,18 +105,18 @@
         </tr>
     </thead>
     <tbody>
-        {% for savedrace in savedraces.query.all() %}
+        {% for savedracelap in savedraceLap %}
         <tr>
-            <td>{{ savedrace.id }}</td>
-            <td>{{ savedrace.round_id }}</td>
-            <td>{{ savedrace.heat_id }}</td>
-            <td>{{ savedrace.class_id }}</td>
-            <td>{{ savedrace.node_index }}</td>
-            <td>{{ savedrace.pilot_id }}</td>
-            <td>{{ savedrace.lap_id }}</td>
-            <td>{{ savedrace.lap_time_stamp }}</td>
-            <td>{{ savedrace.lap_time }}</td>
-            <td>{{ savedrace.lap_time_formatted }}</td>
+            <td>{{ savedracelap.id }}</td>
+            <td>{{ savedracelap.round_id }}</td>
+            <td>{{ savedracelap.heat_id }}</td>
+            <td>{{ savedracelap.class_id }}</td>
+            <td>{{ savedracelap.node_index }}</td>
+            <td>{{ savedracelap.pilot_id }}</td>
+            <td>{{ savedracelap.lap_id }}</td>
+            <td>{{ savedracelap.lap_time_stamp }}</td>
+            <td>{{ savedracelap.lap_time }}</td>
+            <td>{{ savedracelap.lap_time_formatted }}</td>
         </tr>
         {% endfor %}
     </tbody>
@@ -148,7 +136,7 @@
         </tr>
     </thead>
     <tbody>
-        {% for profile in profiles.query.all() %}
+        {% for profile in profiles %}
         <tr>
             <td>{{ profile.id }}</td>
             <td>{{ profile.name }}</td>
@@ -178,7 +166,7 @@
         </tr>
     </thead>
     <tbody>
-        {% for raceformat in race_format.query.all() %}
+        {% for raceformat in race_format %}
         <tr>
             <td>{{ raceformat.id }}</td>
             <td>{{ raceformat.name }}</td>
@@ -205,7 +193,7 @@
         </tr>
     </thead>
     <tbody>
-        {% for setting in globalSettings.query.all() %}
+        {% for setting in globalSettings %}
         <tr>
             <td>{{ setting.id }}</td>
             <td>{{ setting.option_name }}</td>
